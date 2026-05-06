@@ -1,0 +1,467 @@
+// ── Firebase config ──
+const firebaseConfig = {
+  apiKey: "AIzaSyBw4KYHh87jkdCGkggv60yCE0yIqY4qgrQ",
+  authDomain: "sktc-tennis.firebaseapp.com",
+  projectId: "sktc-tennis",
+  storageBucket: "sktc-tennis.firebasestorage.app",
+  messagingSenderId: "1029520755455",
+  appId: "1:1029520755455:web:48c2229cfdcbe7485cdaca"
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+
+async function fbGet(docId) {
+  try {
+    const snap = await db.collection("sktc").doc(docId).get();
+    return snap.exists ? snap.data().value : null;
+  } catch (e) { console.error("fbGet:", e); return null; }
+}
+
+async function fbSet(docId, value) {
+  try {
+    await db.collection("sktc").doc(docId).set({ value });
+  } catch (e) { console.error("fbSet:", e); }
+}
+
+// ── Constants ──
+const DEFAULT_MEMBERS = [
+  "양종열", "최창주", "고기훈", "한득렬", "전현덕", "황인규",
+  "박인수", "이재영", "최성욱", "황장석", "구자옥", "김제찬",
+  "박진석", "박종진", "진정석", "김민규", "연민석", "김상겸",
+  "박승혁", "업태일", "이원권", "유단식", "장동영", "유영철",
+  "정안나", "조찬기"
+];
+const MAX_MEMBERS = 30;
+const INITIAL_ELO = 1000;
+const K = 32;
+
+function calcElo(ra, rb, sa, sb) {
+  const ea = 1 / (1 + Math.pow(10, (rb - ra) / 400));
+  return Math.round(K * ((sa > sb ? 1 : 0.5) - ea));
+}
+
+function recalc(matchList, extraNames = []) {
+  const s = {};
+  [...DEFAULT_MEMBERS, ...extraNames].forEach(n => {
+    if (!s[n]) s[n] = { name: n, elo: INITIAL_ELO, wins: 0, losses: 0, points: 0 };
+  });
+  [...matchList].sort((a, b) => a.id - b.id).forEach(m => {
+    [...m.team1, ...m.team2].forEach(n => { if (!s[n]) s[n] = { name: n, elo: INITIAL_ELO, wins: 0, losses: 0, points: 0 }; });
+    const t1avg = (s[m.team1[0]].elo + s[m.team1[1]].elo) / 2;
+    const t2avg = (s[m.team2[0]].elo + s[m.team2[1]].elo) / 2;
+    const d = calcElo(t1avg, t2avg, m.score1, m.score2);
+    const w = m.score1 > m.score2;
+    m.team1.forEach(n => { s[n] = { ...s[n], elo: s[n].elo + d, wins: s[n].wins + (w?1:0), losses: s[n].losses + (w?0:1), points: s[n].points + (w?3:1) }; });
+    m.team2.forEach(n => { s[n] = { ...s[n], elo: s[n].elo - d, wins: s[n].wins + (!w?1:0), losses: s[n].losses + (!w?0:1), points: s[n].points + (!w?3:1) }; });
+  });
+  return Object.values(s);
+}
+
+// ── Icons ──
+const { useState, useEffect, useCallback } = React;
+
+const Ico = {
+  ranking: React.createElement('svg',{width:17,height:17,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2.2,strokeLinecap:"round",strokeLinejoin:"round"},React.createElement('rect',{x:18,y:3,width:4,height:18,rx:1}),React.createElement('rect',{x:10,y:8,width:4,height:13,rx:1}),React.createElement('rect',{x:2,y:13,width:4,height:8,rx:1})),
+  match: React.createElement('svg',{width:17,height:17,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2.2,strokeLinecap:"round",strokeLinejoin:"round"},React.createElement('circle',{cx:12,cy:12,r:10}),React.createElement('path',{d:"M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"}),React.createElement('path',{d:"M2 12h20"})),
+  history: React.createElement('svg',{width:17,height:17,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2.2,strokeLinecap:"round",strokeLinejoin:"round"},React.createElement('circle',{cx:12,cy:12,r:10}),React.createElement('polyline',{points:"12 6 12 12 16 14"})),
+  members: React.createElement('svg',{width:17,height:17,viewBox:"0 0 24 24",fill:"none",stroke:"currentColor",strokeWidth:2.2,strokeLinecap:"round",strokeLinejoin:"round"},React.createElement('path',{d:"M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"}),React.createElement('circle',{cx:9,cy:7,r:4}),React.createElement('path',{d:"M23 21v-2a4 4 0 0 0-3-3.87"}),React.createElement('path',{d:"M16 3.13a4 4 0 0 1 0 7.75"})),
+};
+
+function TierBadge({ elo }) {
+  const t = elo>=1200?{l:"ACE",c:"#f59e0b",bg:"#fef3c7"}:elo>=1100?{l:"PRO",c:"#6366f1",bg:"#ede9fe"}:elo>=1000?{l:"A",c:"#10b981",bg:"#d1fae5"}:elo>=900?{l:"B",c:"#3b82f6",bg:"#dbeafe"}:{l:"C",c:"#9ca3af",bg:"#f3f4f6"};
+  return React.createElement('span',{style:{background:t.bg,color:t.c,fontFamily:"'DM Mono',monospace",fontSize:"0.63rem",fontWeight:700,padding:"2px 7px",borderRadius:4,letterSpacing:"0.06em"}},t.l);
+}
+
+function EditModal({ match, members, onSave, onClose }) {
+  const [team1, setTeam1] = useState([...match.team1]);
+  const [team2, setTeam2] = useState([...match.team2]);
+  const [score1, setScore1] = useState(String(match.score1));
+  const [score2, setScore2] = useState(String(match.score2));
+  const [date, setDate] = useState(match.date);
+  const [error, setError] = useState("");
+  const allNames = members.map(m => m.name);
+
+  const handleSave = () => {
+    const players = [...team1, ...team2];
+    if (players.some(p=>!p)) return setError("팀원 4명을 모두 선택해주세요.");
+    if (new Set(players).size < 4) return setError("중복 선수가 있어요.");
+    const s1=parseInt(score1), s2=parseInt(score2);
+    if (isNaN(s1)||isNaN(s2)||s1<0||s2<0) return setError("스코어를 올바르게 입력해주세요.");
+    if (s1===s2) return setError("무승부는 등록할 수 없어요.");
+    onSave({...match, team1:[...team1], team2:[...team2], score1:s1, score2:s2, date});
+  };
+
+  const iSt = {background:"#1e293b",border:"1px solid #334155",color:"#e2e8f0",borderRadius:8,padding:"8px",fontSize:"0.83rem",fontFamily:"inherit",width:"100%",outline:"none",marginBottom:6,display:"block"};
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.8)",zIndex:999,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+      <div style={{background:"#111827",border:"1px solid #1e293b",borderRadius:16,padding:24,width:"100%",maxWidth:400,maxHeight:"90vh",overflowY:"auto"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}>
+          <span style={{fontWeight:700,fontSize:"1rem",color:"#f8fafc"}}>✏️ 경기 수정</span>
+          <button onClick={onClose} style={{background:"none",border:"none",color:"#64748b",cursor:"pointer",fontSize:"1.3rem"}}>✕</button>
+        </div>
+        <label style={{fontSize:"0.74rem",color:"#64748b",fontWeight:600,display:"block",marginBottom:5}}>📅 날짜</label>
+        <input type="date" value={date} onChange={e=>setDate(e.target.value)} style={{...iSt,marginBottom:14}} />
+
+        <div style={{display:"grid",gridTemplateColumns:"1fr auto 1fr",gap:8,marginBottom:14}}>
+          <div>
+            <div style={{fontSize:"0.74rem",color:"#4ade80",fontWeight:700,marginBottom:5}}>🟢 팀 A</div>
+            {[0,1].map(i=>(
+              <select key={i} value={team1[i]} onChange={e=>setTeam1(t=>t.map((v,j)=>j===i?e.target.value:v))} style={iSt}>
+                <option value="">선수 {i+1}</option>
+                {allNames.filter(n=>!team1.includes(n)||n===team1[i]).map(n=><option key={n} value={n}>{n}</option>)}
+              </select>
+            ))}
+          </div>
+          <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:8,paddingTop:20}}>
+            <div style={{fontSize:"0.7rem",color:"#475569",fontFamily:"'DM Mono',monospace",fontWeight:700}}>VS</div>
+            <div style={{display:"flex",alignItems:"center",gap:4}}>
+              <input type="number" min="0" value={score1} onChange={e=>setScore1(e.target.value)} style={{background:"#1e293b",border:"1px solid #334155",color:"#e2e8f0",borderRadius:8,padding:"8px 4px",fontSize:"1rem",fontFamily:"'DM Mono',monospace",width:48,textAlign:"center",outline:"none"}} />
+              <span style={{color:"#334155",fontWeight:700}}>:</span>
+              <input type="number" min="0" value={score2} onChange={e=>setScore2(e.target.value)} style={{background:"#1e293b",border:"1px solid #334155",color:"#e2e8f0",borderRadius:8,padding:"8px 4px",fontSize:"1rem",fontFamily:"'DM Mono',monospace",width:48,textAlign:"center",outline:"none"}} />
+            </div>
+          </div>
+          <div>
+            <div style={{fontSize:"0.74rem",color:"#f97316",fontWeight:700,marginBottom:5}}>🟠 팀 B</div>
+            {[0,1].map(i=>(
+              <select key={i} value={team2[i]} onChange={e=>setTeam2(t=>t.map((v,j)=>j===i?e.target.value:v))} style={iSt}>
+                <option value="">선수 {i+1}</option>
+                {allNames.filter(n=>!team2.includes(n)||n===team2[i]).map(n=><option key={n} value={n}>{n}</option>)}
+              </select>
+            ))}
+          </div>
+        </div>
+        {error && <div style={{background:"#2d1b1b",border:"1px solid #ef4444",color:"#fca5a5",borderRadius:8,padding:"9px 12px",fontSize:"0.8rem",marginBottom:12}}>⚠️ {error}</div>}
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={onClose} style={{flex:1,background:"#1e293b",border:"1px solid #334155",color:"#94a3b8",borderRadius:10,padding:10,fontSize:"0.87rem",fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>취소</button>
+          <button onClick={handleSave} style={{flex:2,background:"linear-gradient(135deg,#4ade80,#22d3ee)",color:"#0a0f1e",border:"none",borderRadius:10,padding:10,fontSize:"0.87rem",fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>저장하기</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [tab, setTab] = useState("ranking");
+  const [members, setMembers] = useState([]);
+  const [matches, setMatches] = useState([]);
+  const [extraNames, setExtraNames] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState("");
+  const [fbError, setFbError] = useState("");
+  const [team1, setTeam1] = useState(["",""]);
+  const [team2, setTeam2] = useState(["",""]);
+  const [score1, setScore1] = useState("");
+  const [score2, setScore2] = useState("");
+  const [matchDate, setMatchDate] = useState(new Date().toISOString().slice(0,10));
+  const [matchError, setMatchError] = useState("");
+  const [matchSuccess, setMatchSuccess] = useState(false);
+  const [newMember, setNewMember] = useState("");
+  const [memberError, setMemberError] = useState("");
+  const [editingMatch, setEditingMatch] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const [matchData, extraData] = await Promise.all([fbGet("matches"), fbGet("extraMembers")]);
+        const ml = matchData || [];
+        const ex = extraData || [];
+        setMatches(ml); setExtraNames(ex);
+        setMembers(recalc(ml, ex));
+        setFbError("");
+      } catch(e) { setFbError("Firebase 연결 실패"); }
+      setLoading(false);
+    })();
+  }, []);
+
+  const saveAll = useCallback(async (newMatches, newExtra) => {
+    setSaving(true);
+    const ex = newExtra !== undefined ? newExtra : extraNames;
+    const rec = recalc(newMatches, ex);
+    setMembers(rec); setMatches(newMatches);
+    if (newExtra !== undefined) setExtraNames(newExtra);
+    await Promise.all([fbSet("matches", newMatches), fbSet("extraMembers", ex)]);
+    setSaving(false);
+    setSaveMsg("✓ Firebase 저장 완료");
+    setTimeout(()=>setSaveMsg(""), 2500);
+  }, [extraNames]);
+
+  const ranked = [...members].sort((a,b)=>b.elo-a.elo);
+
+  const addMatch = async () => {
+    setMatchError(""); setMatchSuccess(false);
+    const players=[...team1,...team2];
+    if (players.some(p=>!p)) return setMatchError("팀원 4명을 모두 선택해주세요.");
+    if (new Set(players).size<4) return setMatchError("같은 선수를 중복 선택할 수 없어요.");
+    const s1=parseInt(score1), s2=parseInt(score2);
+    if (isNaN(s1)||isNaN(s2)||s1<0||s2<0) return setMatchError("스코어를 올바르게 입력해주세요.");
+    if (s1===s2) return setMatchError("무승부는 등록할 수 없어요.");
+    await saveAll([{id:Date.now(),date:matchDate,team1:[...team1],team2:[...team2],score1:s1,score2:s2},...matches]);
+    setTeam1(["",""]); setTeam2(["",""]); setScore1(""); setScore2("");
+    setMatchSuccess(true); setTimeout(()=>setMatchSuccess(false),3000);
+  };
+
+  const deleteMatch = async (id) => {
+    if (!window.confirm("이 경기를 삭제할까요?")) return;
+    await saveAll(matches.filter(m=>m.id!==id));
+  };
+
+  const handleEditSave = async (updated) => {
+    await saveAll(matches.map(m=>m.id===updated.id?updated:m));
+    setEditingMatch(null);
+  };
+
+  const addMember = async () => {
+    setMemberError("");
+    if (!newMember.trim()) return;
+    if (members.length>=MAX_MEMBERS) return setMemberError(`최대 ${MAX_MEMBERS}명까지 등록할 수 있어요.`);
+    if (members.find(m=>m.name===newMember.trim())) return setMemberError("이미 등록된 이름이에요.");
+    await saveAll(matches,[...extraNames,newMember.trim()]);
+    setNewMember("");
+  };
+
+  const removeMember = async (name) => {
+    if (!window.confirm(`"${name}" 회원을 삭제할까요?`)) return;
+    await saveAll(matches, extraNames.filter(n=>n!==name));
+  };
+
+  if (loading) return React.createElement('div',{style:{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#0a0f1e",flexDirection:"column",gap:16}},
+    React.createElement('div',{style:{fontSize:"2.5rem"}},"🎾"),
+    React.createElement('div',{style:{color:"#94a3b8",fontSize:"0.9rem"}},"Firebase에서 불러오는 중..."),
+    React.createElement('div',{style:{width:36,height:36,border:"3px solid #1e293b",borderTop:"3px solid #4ade80",borderRadius:"50%",animation:"spin 0.9s linear infinite"}})
+  );
+
+  const capPct=(members.length/MAX_MEMBERS)*100;
+  const capColor=members.length>=MAX_MEMBERS?"#ef4444":members.length>=28?"#f59e0b":"#4ade80";
+  const ms={background:"#1e293b",border:"1px solid #334155",color:"#e2e8f0",borderRadius:8,padding:"9px 10px",fontSize:"0.84rem",fontFamily:"inherit",width:"100%",outline:"none"};
+  const sc={background:"#1e293b",border:"1px solid #334155",color:"#e2e8f0",borderRadius:8,padding:"9px 7px",fontSize:"1.05rem",fontFamily:"'DM Mono',monospace",width:58,textAlign:"center",outline:"none"};
+  const ab={background:"linear-gradient(135deg,#4ade80,#22d3ee)",color:"#0a0f1e",border:"none",borderRadius:10,padding:"11px 22px",fontSize:"0.88rem",fontWeight:700,cursor:"pointer",fontFamily:"inherit"};
+
+  return React.createElement('div',{style:{minHeight:"100vh",background:"#0a0f1e",fontFamily:"'DM Sans','Noto Sans KR',sans-serif",color:"#e2e8f0"}},
+    React.createElement('style',null,`
+      *{box-sizing:border-box} select option{background:#1e293b;color:#e2e8f0}
+      .tb{background:none;border:none;cursor:pointer;padding:9px 13px;display:flex;align-items:center;gap:6px;font-size:0.79rem;font-weight:600;border-radius:10px;transition:all .18s;color:#64748b;font-family:inherit;white-space:nowrap}
+      .tb.active{background:#1e293b;color:#f0fdf4} .tb:hover{color:#94a3b8}
+      .rr{display:flex;align-items:center;gap:12px;padding:11px 16px;border-radius:10px;transition:background .15s} .rr:hover{background:#0f172a}
+      .gold{background:linear-gradient(135deg,#fef3c7,#fde68a);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+      .silver{background:linear-gradient(135deg,#f1f5f9,#cbd5e1);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+      .bronze{background:linear-gradient(135deg,#fde8d4,#fdba74);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+      .db{background:#1e293b;border:1px solid #334155;color:#ef4444;border-radius:7px;padding:5px 10px;font-size:.72rem;cursor:pointer;font-family:inherit}
+      .db:hover{background:#2d1b1b}
+      .eb{background:#1e293b;border:1px solid #334155;color:#94a3b8;border-radius:7px;padding:5px 10px;font-size:.72rem;cursor:pointer;font-family:inherit}
+      .eb:hover{background:#1e3a5f;color:#60a5fa}
+      @keyframes spin{to{transform:rotate(360deg)}}
+    `),
+
+    editingMatch && React.createElement(EditModal,{match:editingMatch,members,onSave:handleEditSave,onClose:()=>setEditingMatch(null)}),
+
+    // Header
+    React.createElement('div',{style:{background:"#060d1a",borderBottom:"1px solid #1e293b",padding:"14px 20px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100}},
+      React.createElement('div',{style:{display:"flex",alignItems:"center",gap:10}},
+        React.createElement('span',{style:{fontSize:"1.4rem"}},"🎾"),
+        React.createElement('div',null,
+          React.createElement('div',{style:{fontFamily:"'DM Mono',monospace",fontWeight:700,fontSize:"1rem",color:"#f0fdf4",letterSpacing:"0.06em"}},"SKTC"),
+          React.createElement('div',{style:{fontSize:"0.62rem",color:"#475569",letterSpacing:"0.1em",fontWeight:600}},"TENNIS CLUB")
+        )
+      ),
+      React.createElement('div',{style:{display:"flex",alignItems:"center",gap:10}},
+        fbError && React.createElement('div',{style:{fontSize:"0.7rem",color:"#ef4444"}},"⚠️ "+fbError),
+        saving && React.createElement('div',{style:{width:16,height:16,border:"2px solid #1e293b",borderTop:"2px solid #4ade80",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}),
+        saveMsg && React.createElement('div',{style:{background:"#14532d",color:"#4ade80",fontSize:"0.7rem",padding:"4px 10px",borderRadius:20,fontWeight:600}},saveMsg),
+        React.createElement('div',{style:{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:3}},
+          React.createElement('div',{style:{fontSize:"0.7rem"}},
+            React.createElement('span',{style:{color:capColor,fontFamily:"'DM Mono',monospace",fontWeight:700}},members.length),
+            React.createElement('span',{style:{color:"#334155"}}," / "+MAX_MEMBERS)
+          ),
+          React.createElement('div',{style:{width:50,height:3,background:"#1e293b",borderRadius:2,overflow:"hidden"}},
+            React.createElement('div',{style:{width:`${capPct}%`,height:"100%",background:capColor,borderRadius:2}})
+          )
+        )
+      )
+    ),
+
+    // Tabs
+    React.createElement('div',{style:{background:"#060d1a",borderBottom:"1px solid #1e293b",padding:"6px 10px",display:"flex",gap:2,overflowX:"auto"}},
+      [["ranking","랭킹"],["match","경기 등록"],["history","경기 기록"],["members","회원 관리"]].map(([id,label])=>
+        React.createElement('button',{key:id,className:`tb ${tab===id?"active":""}`,onClick:()=>setTab(id)},Ico[id]," ",label)
+      )
+    ),
+
+    React.createElement('div',{style:{maxWidth:700,margin:"0 auto",padding:"20px 16px"}},
+
+      // ── RANKING ──
+      tab==="ranking" && React.createElement('div',null,
+        React.createElement('div',{style:{marginBottom:16}},
+          React.createElement('div',{style:{fontFamily:"'DM Mono',monospace",fontSize:"0.67rem",color:"#4ade80",letterSpacing:"0.14em",fontWeight:700,marginBottom:4}},"SEASON RANKING"),
+          React.createElement('div',{style:{fontSize:"1.22rem",fontWeight:700,color:"#f8fafc"}},"전체 랭킹 ",React.createElement('span',{style:{fontSize:"0.84rem",color:"#475569",fontWeight:400}},"("+members.length+"명 · "+matches.length+"경기)"))
+        ),
+        React.createElement('div',{style:{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}},
+          [["ACE","#f59e0b","#fef3c7","1200+"],["PRO","#6366f1","#ede9fe","1100+"],["A","#10b981","#d1fae5","1000+"],["B","#3b82f6","#dbeafe","900+"],["C","#9ca3af","#f3f4f6","~900"]].map(([l,c,bg,r])=>
+            React.createElement('span',{key:l,style:{background:bg,color:c,fontSize:"0.62rem",fontWeight:700,padding:"2px 8px",borderRadius:4,fontFamily:"'DM Mono',monospace"}},l," ",React.createElement('span',{style:{opacity:.65}},r))
+          )
+        ),
+        React.createElement('div',{style:{background:"#111827",border:"1px solid #1e293b",borderRadius:14,padding:"4px 0"}},
+          ranked.map((m,i)=>{
+            const total=m.wins+m.losses, wr=total>0?Math.round(m.wins/total*100):0;
+            return React.createElement('div',{key:m.name,className:"rr"},
+              React.createElement('div',{style:{width:28,textAlign:"center",fontFamily:"'DM Mono',monospace",fontWeight:700,fontSize:i<3?"1rem":"0.84rem",flexShrink:0}},
+                i===0?React.createElement('span',{className:"gold"},"1"):i===1?React.createElement('span',{className:"silver"},"2"):i===2?React.createElement('span',{className:"bronze"},"3"):React.createElement('span',{style:{color:"#475569"}},i+1)
+              ),
+              React.createElement('div',{style:{flex:1,minWidth:0}},
+                React.createElement('div',{style:{display:"flex",alignItems:"center",gap:7,marginBottom:3}},
+                  React.createElement('span',{style:{fontWeight:600,fontSize:"0.91rem"}},m.name),
+                  React.createElement(TierBadge,{elo:m.elo})
+                ),
+                React.createElement('div',{style:{display:"flex",gap:10}},
+                  React.createElement('span',{style:{fontSize:"0.69rem",color:"#64748b"}},m.wins+"승 "+m.losses+"패"),
+                  React.createElement('span',{style:{fontSize:"0.69rem",color:"#64748b"}},"승률 "+wr+"%"),
+                  React.createElement('span',{style:{fontSize:"0.69rem",color:"#4ade80",fontWeight:600}},m.points+"pt")
+                )
+              ),
+              React.createElement('div',{style:{textAlign:"right",flexShrink:0}},
+                React.createElement('div',{style:{fontFamily:"'DM Mono',monospace",fontWeight:700,fontSize:"0.98rem",color:"#f0fdf4"}},m.elo),
+                React.createElement('div',{style:{fontSize:"0.59rem",color:"#475569",letterSpacing:"0.06em"}},"ELO")
+              )
+            );
+          })
+        )
+      ),
+
+      // ── MATCH ENTRY ──
+      tab==="match" && React.createElement('div',null,
+        React.createElement('div',{style:{marginBottom:16}},
+          React.createElement('div',{style:{fontFamily:"'DM Mono',monospace",fontSize:"0.67rem",color:"#4ade80",letterSpacing:"0.14em",fontWeight:700,marginBottom:4}},"DOUBLES MATCH"),
+          React.createElement('div',{style:{fontSize:"1.22rem",fontWeight:700,color:"#f8fafc"}},"경기 등록")
+        ),
+        React.createElement('div',{style:{background:"#111827",border:"1px solid #1e293b",borderRadius:14,padding:20,display:"flex",flexDirection:"column",gap:16}},
+          React.createElement('div',null,
+            React.createElement('label',{style:{fontSize:"0.74rem",color:"#64748b",fontWeight:600,display:"block",marginBottom:5}},"📅 경기 날짜"),
+            React.createElement('input',{type:"date",value:matchDate,onChange:e=>setMatchDate(e.target.value),style:{background:"#1e293b",border:"1px solid #334155",color:"#e2e8f0",borderRadius:8,padding:"9px 14px",fontSize:"0.88rem",fontFamily:"inherit",width:"100%",outline:"none"}})
+          ),
+          React.createElement('div',{style:{display:"grid",gridTemplateColumns:"1fr auto 1fr",gap:10,alignItems:"start"}},
+            React.createElement('div',null,
+              React.createElement('label',{style:{fontSize:"0.74rem",color:"#4ade80",fontWeight:700,display:"block",marginBottom:7}},"🟢 팀 A"),
+              React.createElement('div',{style:{display:"flex",flexDirection:"column",gap:7}},
+                [0,1].map(i=>React.createElement('select',{key:i,style:ms,value:team1[i],onChange:e=>setTeam1(t=>t.map((v,j)=>j===i?e.target.value:v))},
+                  React.createElement('option',{value:""},"선수 "+(i+1)),
+                  members.filter(m=>!team1.includes(m.name)||m.name===team1[i]).map(m=>React.createElement('option',{key:m.name,value:m.name},m.name))
+                ))
+              )
+            ),
+            React.createElement('div',{style:{display:"flex",flexDirection:"column",alignItems:"center",gap:9,paddingTop:24}},
+              React.createElement('div',{style:{fontFamily:"'DM Mono',monospace",fontWeight:700,fontSize:"0.73rem",color:"#475569"}},"VS"),
+              React.createElement('div',{style:{display:"flex",alignItems:"center",gap:4}},
+                React.createElement('input',{type:"number",style:sc,placeholder:"0",min:0,value:score1,onChange:e=>setScore1(e.target.value)}),
+                React.createElement('span',{style:{color:"#334155",fontWeight:700}},":"),
+                React.createElement('input',{type:"number",style:sc,placeholder:"0",min:0,value:score2,onChange:e=>setScore2(e.target.value)})
+              )
+            ),
+            React.createElement('div',null,
+              React.createElement('label',{style:{fontSize:"0.74rem",color:"#f97316",fontWeight:700,display:"block",marginBottom:7}},"🟠 팀 B"),
+              React.createElement('div',{style:{display:"flex",flexDirection:"column",gap:7}},
+                [0,1].map(i=>React.createElement('select',{key:i,style:ms,value:team2[i],onChange:e=>setTeam2(t=>t.map((v,j)=>j===i?e.target.value:v))},
+                  React.createElement('option',{value:""},"선수 "+(i+1)),
+                  members.filter(m=>!team2.includes(m.name)||m.name===team2[i]).map(m=>React.createElement('option',{key:m.name,value:m.name},m.name))
+                ))
+              )
+            )
+          ),
+          matchError && React.createElement('div',{style:{background:"#2d1b1b",border:"1px solid #ef4444",color:"#fca5a5",borderRadius:8,padding:"9px 13px",fontSize:"0.81rem"}},"⚠️ "+matchError),
+          matchSuccess && React.createElement('div',{style:{background:"#14532d",border:"1px solid #4ade80",color:"#86efac",borderRadius:8,padding:"9px 13px",fontSize:"0.81rem",textAlign:"center"}},"✅ 등록 완료! Firebase에 저장됐어요."),
+          React.createElement('button',{style:{...ab,width:"100%",opacity:saving?.6:1},onClick:addMatch,disabled:saving},saving?"저장 중...":"경기 등록하기"),
+          React.createElement('div',{style:{background:"#0f172a",borderRadius:10,padding:13,fontSize:"0.75rem",color:"#64748b",lineHeight:1.75}},
+            React.createElement('span',{style:{color:"#4ade80",fontWeight:700}},"ELO 시스템 "),"— 팀 평균 ELO 기반. 강팀을 이기면 더 많이 얻고, 약팀에 지면 더 많이 잃어요. 승리 +3pt / 패배 +1pt 적립."
+          )
+        )
+      ),
+
+      // ── HISTORY ──
+      tab==="history" && React.createElement('div',null,
+        React.createElement('div',{style:{marginBottom:16}},
+          React.createElement('div',{style:{fontFamily:"'DM Mono',monospace",fontSize:"0.67rem",color:"#4ade80",letterSpacing:"0.14em",fontWeight:700,marginBottom:4}},"MATCH LOG"),
+          React.createElement('div',{style:{fontSize:"1.22rem",fontWeight:700,color:"#f8fafc"}},"경기 기록 ",React.createElement('span',{style:{fontSize:"0.88rem",color:"#475569",fontWeight:400}},"("+matches.length+"경기)"))
+        ),
+        matches.length===0
+          ? React.createElement('div',{style:{background:"#111827",border:"1px solid #1e293b",borderRadius:14,padding:20,textAlign:"center",color:"#475569",paddingTop:44,paddingBottom:44}},
+              React.createElement('div',{style:{fontSize:"2rem",marginBottom:8}},"🎾"),"아직 등록된 경기가 없어요"
+            )
+          : React.createElement('div',{style:{display:"flex",flexDirection:"column",gap:10}},
+              matches.map(m=>{
+                const w=m.score1>m.score2;
+                return React.createElement('div',{key:m.id,style:{background:"#111827",border:"1px solid #1e293b",borderRadius:14,padding:"13px 15px"}},
+                  React.createElement('div',{style:{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}},
+                    React.createElement('div',{style:{fontSize:"0.69rem",color:"#475569",fontFamily:"'DM Mono',monospace"}},m.date),
+                    React.createElement('div',{style:{display:"flex",gap:6}},
+                      React.createElement('button',{className:"eb",onClick:()=>setEditingMatch(m)},"✏️ 수정"),
+                      React.createElement('button',{className:"db",onClick:()=>deleteMatch(m.id)},"🗑 삭제")
+                    )
+                  ),
+                  React.createElement('div',{style:{display:"grid",gridTemplateColumns:"1fr auto 1fr",alignItems:"center",gap:8}},
+                    React.createElement('div',null,
+                      React.createElement('div',{style:{fontSize:"0.78rem",fontWeight:700,color:w?"#4ade80":"#94a3b8",marginBottom:2}},"🟢 팀 A "+(w?"✓":"")),
+                      React.createElement('div',{style:{fontSize:"0.73rem",color:"#64748b"}},m.team1.join(", "))
+                    ),
+                    React.createElement('div',{style:{textAlign:"center",fontFamily:"'DM Mono',monospace",fontWeight:700,fontSize:"1.12rem",color:"#f8fafc"}},m.score1+":"+m.score2),
+                    React.createElement('div',{style:{textAlign:"right"}},
+                      React.createElement('div',{style:{fontSize:"0.78rem",fontWeight:700,color:!w?"#f97316":"#94a3b8",marginBottom:2}},(!w?"✓ ":"")+"팀 B 🟠"),
+                      React.createElement('div',{style:{fontSize:"0.73rem",color:"#64748b"}},m.team2.join(", "))
+                    )
+                  )
+                );
+              })
+            )
+      ),
+
+      // ── MEMBERS ──
+      tab==="members" && React.createElement('div',null,
+        React.createElement('div',{style:{marginBottom:16}},
+          React.createElement('div',{style:{fontFamily:"'DM Mono',monospace",fontSize:"0.67rem",color:"#4ade80",letterSpacing:"0.14em",fontWeight:700,marginBottom:4}},"ROSTER"),
+          React.createElement('div',{style:{fontSize:"1.22rem",fontWeight:700,color:"#f8fafc"}},"회원 관리 ",
+            React.createElement('span',{style:{fontSize:"0.86rem",fontWeight:400}},
+              React.createElement('span',{style:{color:capColor,fontWeight:700}},members.length),
+              React.createElement('span',{style:{color:"#475569"}}," / "+MAX_MEMBERS+"명")
+            )
+          )
+        ),
+        React.createElement('div',{style:{background:"#111827",border:"1px solid #1e293b",borderRadius:14,padding:"13px 17px",marginBottom:13}},
+          React.createElement('div',{style:{display:"flex",justifyContent:"space-between",marginBottom:7}},
+            React.createElement('span',{style:{fontSize:"0.74rem",color:"#64748b",fontWeight:600}},"정원 현황"),
+            React.createElement('span',{style:{fontSize:"0.74rem",color:capColor,fontWeight:700}},members.length>=MAX_MEMBERS?"⛔ 정원 마감":`${MAX_MEMBERS-members.length}명 추가 가능`)
+          ),
+          React.createElement('div',{style:{background:"#1e293b",borderRadius:6,height:7,overflow:"hidden"}},
+            React.createElement('div',{style:{width:`${capPct}%`,height:"100%",background:members.length>=MAX_MEMBERS?"#ef4444":members.length>=28?"#f59e0b":"linear-gradient(90deg,#4ade80,#22d3ee)",borderRadius:6}})
+          )
+        ),
+        React.createElement('div',{style:{background:"#111827",border:"1px solid #1e293b",borderRadius:14,padding:20,marginBottom:13}},
+          React.createElement('div',{style:{fontSize:"0.78rem",color:"#64748b",marginBottom:9,fontWeight:600}},"새 회원 추가"),
+          React.createElement('div',{style:{display:"flex",gap:8}},
+            React.createElement('input',{style:{background:"#1e293b",border:"1px solid #334155",color:"#e2e8f0",borderRadius:8,padding:"9px 14px",fontSize:".9rem",fontFamily:"inherit",flex:1,outline:"none"},
+              placeholder:members.length>=MAX_MEMBERS?"정원이 꽉 찼어요":"회원 이름 입력",
+              value:newMember,onChange:e=>{setNewMember(e.target.value);setMemberError("");},
+              onKeyDown:e=>e.key==="Enter"&&addMember(),disabled:members.length>=MAX_MEMBERS}),
+            React.createElement('button',{style:{...ab,opacity:members.length>=MAX_MEMBERS||saving?.5:1},onClick:addMember,disabled:members.length>=MAX_MEMBERS||saving},"추가")
+          ),
+          memberError && React.createElement('div',{style:{marginTop:7,fontSize:"0.77rem",color:"#fca5a5"}},"⚠️ "+memberError)
+        ),
+        React.createElement('div',{style:{background:"#111827",border:"1px solid #1e293b",borderRadius:14,padding:"4px 0"}},
+          ranked.map((m,i)=>
+            React.createElement('div',{key:m.name,style:{display:"flex",alignItems:"center",gap:10,padding:"10px 15px",borderBottom:i<members.length-1?"1px solid #1e293b":"none"}},
+              React.createElement('div',{style:{width:25,height:25,borderRadius:"50%",background:"#1e293b",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"0.67rem",fontWeight:700,color:"#64748b",fontFamily:"'DM Mono',monospace",flexShrink:0}},String(i+1).padStart(2,"0")),
+              React.createElement('div',{style:{flex:1,minWidth:0}},
+                React.createElement('div',{style:{fontWeight:600,fontSize:"0.89rem",marginBottom:1}},m.name),
+                React.createElement('div',{style:{fontSize:"0.67rem",color:"#475569"}},"ELO "+m.elo+" · "+m.wins+"승 "+m.losses+"패 · "+m.points+"pt")
+              ),
+              React.createElement(TierBadge,{elo:m.elo}),
+              !DEFAULT_MEMBERS.includes(m.name) && React.createElement('button',{className:"db",onClick:()=>removeMember(m.name)},"삭제")
+            )
+          )
+        )
+      )
+    )
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(App));
